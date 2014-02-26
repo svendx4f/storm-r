@@ -14,19 +14,25 @@ It is therefore still very useful, given the range of functionality in R (massiv
 
 ## Usage
 
-I haven't released this into a binary repo yet, so clone it and run "mvn clean:install". Add the dependency:
+Make sure R is installed and has the "rjson" package on each host where a Storm worker is running (here's an [Ansible script](http://svendvanderveken.wordpress.com/2014/02/25/snippet-to-install-r-packages-with-ansible/) to do that)
+
+Storm-R hasn't been released into a binary repo yet, so clone it and run "mvn clean:install". Add the dependency:
 
 	<dependency>
   		<groupId>com.github.quintona</groupId>
   		<artifactId>storm-r</artifactId>
-  		<version>0.0.1-SNAPSHOT</version>
+  		<version>0.0.2-SNAPSHOT</version>
 	</dependency>
 	
 Then include the function in your trident stream:
 
 	topology.newStream("valueStream", spout)
-				.each(new Fields(fields), new RFunction(Arrays.asList(new String[] {}, 				"predict_linear").withNamedInitCode("linear"),
-						new Fields("rate"))
+		.each(	new Fields(fields), 
+				new RFunction("/usr/local/bin/R", 						// R binary location
+							  Arrays.asList(new String[] {}),
+							  "predict_linear")							// R function to call
+					  .withNamedInitCode("linear"),						// file name containing the R code
+				new Fields("rate"))
 						
 I have chosen convention over configuration here, so the assumption inherent is that there is a single R function, that takes a vector as input and returns a vector as output (sound familiar?). You can supply the function in 3 ways:
 
