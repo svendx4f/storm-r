@@ -1,11 +1,12 @@
 package com.github.quintona;
 
-import java.io.BufferedReader;
-import java.io.DataOutputStream;
-import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.*;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 
 import org.json.simple.JSONArray;
 import org.json.simple.JSONValue;
@@ -25,10 +26,15 @@ public class RFunction extends BaseFunction {
 	String rExecutable;
 	List<String> libraries;
 	String functionName;
-	BufferedReader reader;
+//	BufferedReader reader;
+
+    Queue<String> errors = new LinkedList<>();
+    Queue<String> responses = new LinkedList<>();
+    Executor exec = Executors.newFixedThreadPool(2);
+
 	static String ls = System.getProperty("line.separator");
 	private String initCode = null;
-	
+
 	public static final String START_LINE = "<s>";
 	public static final String END_LINE = "<e>";
 	
@@ -58,15 +64,20 @@ public class RFunction extends BaseFunction {
 		ProcessBuilder builder = new ProcessBuilder(rExecutable, "--vanilla", "-q", "--slave");
 		try {
 			process = builder.start();
+
+            // I/O to R + async thread to listen to errors
 			rInput = new DataOutputStream(process.getOutputStream());
-			reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+			//reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            exec.execute(new RIOReader(process.getInputStream(), responses));
+            exec.execute(new RIOReader(process.getErrorStream(), errors));
+
 			loadLibraries();
 			if(initCode != null){
 				rInput.writeBytes(initCode + "\n");
 				rInput.flush();
 			}
 		} catch (IOException e) {
-			throw new RuntimeException("Could not start R, please check install and settings" + e);
+			throw new RuntimeException("Could not start R, please check install and settings" , e);
 		}
     }
 	
@@ -79,6 +90,7 @@ public class RFunction extends BaseFunction {
 	}
 	
 	public static String trimOutput(String output){
+        if (output == null) return "";
 		output = output.replace("[1]", "");
 		output = output.replace("\\", "");
 		output = output.trim();
@@ -87,50 +99,81 @@ public class RFunction extends BaseFunction {
 	
 	private JSONArray getResult() throws ParseException{
 		StringBuilder stringBuilder = new StringBuilder();
+
 		boolean awaitingStart = true;
-		try {
-			//This first read is the slow blocking one. It waits for the R process to run
-        	String line = reader.readLine();
-			while (line != null) {
-				System.out.println(line);
-				if(line.equals(START_LINE)){
-					awaitingStart = false;
-				} else if(line.equals(END_LINE)) {
-					if(awaitingStart)
-						throw new RuntimeException("Something went wrong. Received response ending before beginning!");
-                    break;
-                } else if(!awaitingStart){
-					stringBuilder.append(line);
-					stringBuilder.append(ls);
-				}
-				line = reader.readLine();
-			}
-		} catch (IOException e) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
-		}
-		if(awaitingStart)return null;
-		String trimmedContent = trimOutput(stringBuilder.toString());
+        checkErrors();
+
+        while (responses.isEmpty()) {
+            try {
+                System.out.println("waiting answer from R...");
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+
+
+        while (!responses.isEmpty()) {
+            String line = responses.poll();
+
+            if(line.equals(START_LINE)){
+                awaitingStart = false;
+            } else if(line.equals(END_LINE)) {
+                if(awaitingStart)
+                    throw new RuntimeException("Something went wrong. Received response ending before beginning!");
+                break;
+            } else if(!awaitingStart){
+                stringBuilder.append(line);
+                stringBuilder.append(ls);
+            }
+        }
+
+        System.out.println("awaitingStart = " + awaitingStart);
+        final String response = stringBuilder.toString().trim();
+
+        if(awaitingStart) {
+            if (!"".equals(response))
+                throw new RuntimeException("Unrecognized response from R runtime: " + response);
+            return null;
+        }
+		final String trimmedContent = trimOutput(response);
 		if(trimmedContent == null)
 			return null;
 		if("[]".equals(trimmedContent))
 			return null;
         return (JSONArray)JSONValue.parseWithException(trimmedContent);
 	}
-	
-	public static String readFile(String file) {
+
+    /** Checks the presence of any error reported by R and, if so, throws an exception **/
+    private void checkErrors(){
+        if (!errors.isEmpty()) {
+            StringBuffer err = new StringBuffer();
+            while (!errors.isEmpty()) {
+                err.append(errors.poll());
+            }
+            throw new RuntimeException("Error from the R runtime: " + err);
+        }
+
+        try {
+            throw new RuntimeException("R runtime has terminated with return value: " + process.exitValue());
+        } catch (IllegalThreadStateException exc) {
+            // NOP: the process has not terminated: things are cool
+        }
+    }
+
+    public static String readFile(String file) {
 		BufferedReader reader = new BufferedReader(new InputStreamReader(
 				RFunction.class.getResourceAsStream(file)));
-		String line = null;
 		StringBuilder stringBuilder = new StringBuilder();
 
 		try {
+		    String line;
 			while ((line = reader.readLine()) != null) {
 				stringBuilder.append(line);
 				stringBuilder.append(ls);
 			}
 		} catch (IOException e) {
-			throw new RuntimeException("Could not load resource: " + e);
+			throw new RuntimeException("Could not load resource: ", e);
 		}
 		return stringBuilder.toString();
 	}
@@ -152,17 +195,23 @@ public class RFunction extends BaseFunction {
     
     public JSONArray performFunction(JSONArray functionInput){
     	try {
+
+            // this allows only one parameter...
     		String input = functionInput.toJSONString();
-    		input = input.replace("\\", "");
+            input = input.replace("\\", "");
 			rInput.writeBytes("list <- fromJSON('" + input + "')\n");
 			rInput.writeBytes("output <- " + functionName + "(list)\n");
 			rInput.writeBytes("write('" + START_LINE + "', stdout())\n");
 			rInput.writeBytes("toJSON(output)\n");
 			rInput.writeBytes("write('" + END_LINE + "', stdout())\n");
 			rInput.flush();
+
+            System.out.println("input = " + input);
+
 			return getResult();
 		} catch (IOException | ParseException e) {
-			throw new RuntimeException("Exception handling response from R" + e);
+            checkErrors();
+			throw new RuntimeException("Exception handling response from R" , e);
 		}
     }
 
@@ -174,6 +223,44 @@ public class RFunction extends BaseFunction {
 			collector.emit(coerceResponce(result));
 	}
 
-	
+
+    /**
+     * async listener on the stderr of the R runtime that forwards anything received into the the error queue
+     * */
+    private class RIOReader implements Runnable {
+
+        private final BufferedReader reader;
+        private final Queue<String> msgs;
+
+        private RIOReader(InputStream stream, Queue<String> msgs) {
+            reader = new BufferedReader(new InputStreamReader(stream));
+            this.msgs = msgs;
+        }
+
+
+        @Override
+        public void run() {
+            try {
+                while (true) {
+                    String s = reader.readLine();
+                    if (s != null) {
+                        System.out.println("s = " + s);
+                        msgs.add(s);
+                    } else {
+                        Thread.sleep(5);
+                    }
+                }
+            } catch (Exception e) {
+                throw new RuntimeException("could not read stream from R runtime", e);
+            } finally {
+                try {
+                    reader.close();
+                } catch (IOException e1) {
+                    e1.printStackTrace();
+                }
+            }
+
+        }
+    };
 
 }
