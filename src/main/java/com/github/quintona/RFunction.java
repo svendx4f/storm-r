@@ -21,18 +21,17 @@ import storm.trident.tuple.TridentTuple;
 
 public class RFunction extends BaseFunction {
 	
-	Process process;
-	DataOutputStream rInput;
-	String rExecutable;
-	List<String> libraries;
-	String functionName;
-//	BufferedReader reader;
+	private Process process;
+    private DataOutputStream rInput;
+    private String rExecutable;
+    private List<String> libraries;
+    private String functionName;
 
-    Queue<String> errors = new LinkedList<>();
-    Queue<String> responses = new LinkedList<>();
-    Executor exec = Executors.newFixedThreadPool(2);
+    private Queue<String> errors = new LinkedList<>();
+    private Queue<String> responses = new LinkedList<>();
+    private transient Executor exec;
 
-	static String ls = System.getProperty("line.separator");
+    private static String ls = System.getProperty("line.separator");
 	private String initCode = null;
 
 	public static final String START_LINE = "<s>";
@@ -64,10 +63,10 @@ public class RFunction extends BaseFunction {
 		ProcessBuilder builder = new ProcessBuilder(rExecutable, "--vanilla", "-q", "--slave");
 		try {
 			process = builder.start();
+            exec = Executors.newFixedThreadPool(2);
 
             // I/O to R + async thread to listen to errors
 			rInput = new DataOutputStream(process.getOutputStream());
-			//reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
             exec.execute(new RIOReader(process.getInputStream(), responses));
             exec.execute(new RIOReader(process.getErrorStream(), errors));
 
@@ -128,9 +127,7 @@ public class RFunction extends BaseFunction {
             }
         }
 
-        System.out.println("awaitingStart = " + awaitingStart);
         final String response = stringBuilder.toString().trim();
-
         if(awaitingStart) {
             if (!"".equals(response))
                 throw new RuntimeException("Unrecognized response from R runtime: " + response);
@@ -196,17 +193,13 @@ public class RFunction extends BaseFunction {
     public JSONArray performFunction(JSONArray functionInput){
     	try {
 
-            // this allows only one parameter...
-    		String input = functionInput.toJSONString();
-            input = input.replace("\\", "");
+    		String input = functionInput.toJSONString().replace("\\", "");
 			rInput.writeBytes("list <- fromJSON('" + input + "')\n");
 			rInput.writeBytes("output <- " + functionName + "(list)\n");
 			rInput.writeBytes("write('" + START_LINE + "', stdout())\n");
 			rInput.writeBytes("toJSON(output)\n");
 			rInput.writeBytes("write('" + END_LINE + "', stdout())\n");
 			rInput.flush();
-
-            System.out.println("input = " + input);
 
 			return getResult();
 		} catch (IOException | ParseException e) {
@@ -225,7 +218,7 @@ public class RFunction extends BaseFunction {
 
 
     /**
-     * async listener on the stderr of the R runtime that forwards anything received into the the error queue
+     * async listener on a stream which simply makes everything available in a queue for later
      * */
     private class RIOReader implements Runnable {
 
@@ -237,14 +230,12 @@ public class RFunction extends BaseFunction {
             this.msgs = msgs;
         }
 
-
         @Override
         public void run() {
             try {
                 while (true) {
                     String s = reader.readLine();
                     if (s != null) {
-                        System.out.println("s = " + s);
                         msgs.add(s);
                     } else {
                         Thread.sleep(5);
@@ -259,8 +250,6 @@ public class RFunction extends BaseFunction {
                     e1.printStackTrace();
                 }
             }
-
         }
     };
-
 }

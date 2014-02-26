@@ -48,9 +48,11 @@ public class TestLinear {
 
 	@Test
 	public void test() throws InterruptedException {
-        System.out.println("inputs = " + Arrays.asList(inputs));
+        System.out.println("inputttts = " + Arrays.asList(inputs));
 
 		TridentTuple values = new MockTridentTuple(Arrays.asList(getNames(inputs.length)), Arrays.asList(inputs));
+
+        System.out.println("values = " + values);
 
 		RFunction function = new RFunction("/usr/local/bin/R",
 				Arrays.asList(new String[] {}), "predict_linear")
