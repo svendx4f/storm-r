@@ -23,12 +23,15 @@ import storm.trident.tuple.TridentTuple;
 /**
  * Storm Function that invokes a R function for each tuple.
  *
- * A R process is started
+ * A separate R process is started during the initialization.
+ *
+ * Any error occurring during initialization trigger a failure to start the topology. Any error occurring at runtime
+ * is considered non retry-able and is just logged.
  *
  * */
 public class RFunction extends BaseFunction {
-	
-	private Process process;
+
+    private Process process;
     private DataOutputStream rInput;
     private String rExecutable;
     private List<String> libraries;
@@ -38,74 +41,74 @@ public class RFunction extends BaseFunction {
     private Queue<String> responses = new LinkedList<>();
     private transient Executor exec;
 
-	private String initCode;
+    private String initCode;
 
     private static String ls = System.getProperty("line.separator");
-	public static final String START_LINE = "<s>";
-	public static final String END_LINE = "<e>";
-	
-	public RFunction(String rExecutable, List<String> libraries, String functionName){
-		this.rExecutable = rExecutable;
-		this.functionName = functionName;
-		this.libraries = libraries;
+    public static final String START_LINE = "<s>";
+    public static final String END_LINE = "<e>";
+
+    public RFunction(String rExecutable, List<String> libraries, String functionName){
+        this.rExecutable = rExecutable;
+        this.functionName = functionName;
+        this.libraries = libraries;
         this.libraries.add("rjson");
-	}
-	
-	public RFunction(List<String> libraries, String functionName){
+    }
+
+    public RFunction(List<String> libraries, String functionName){
         this("/usr/bin/R", libraries, functionName);
-	}
-	
-	public RFunction withInitCode(String rCode){
-		this.initCode = rCode;
-		return this;
-	}
-	
-	public RFunction withNamedInitCode(String name) throws IOException {
-		return withInitCode(FileUtils.readFileToString(new File("/" + name + ".R")));
-	}
+    }
+
+    public RFunction withInitCode(String rCode){
+        this.initCode = rCode;
+        return this;
+    }
+
+    public RFunction withNamedInitCode(String name) throws IOException {
+        return withInitCode(FileUtils.readFileToString(new File("/" + name + ".R")));
+    }
 
     @Override
-	public void prepare(Map conf, TridentOperationContext context) {
-		try {
-		    ProcessBuilder builder = new ProcessBuilder(rExecutable, "--vanilla", "-q", "--slave");
-			process = builder.start();
+    public void prepare(Map conf, TridentOperationContext context) {
+        try {
+            ProcessBuilder builder = new ProcessBuilder(rExecutable, "--vanilla", "-q", "--slave");
+            process = builder.start();
             exec = Executors.newFixedThreadPool(2);
 
             // I/O to R + async thread to listen to stdout and stderr
-			rInput = new DataOutputStream(process.getOutputStream());
+            rInput = new DataOutputStream(process.getOutputStream());
             exec.execute(new RIOReader(process.getInputStream(), responses));
             exec.execute(new RIOReader(process.getErrorStream(), errors));
 
-			loadLibraries();
-			if(initCode != null){
-				rInput.writeBytes(initCode + "\n");
-				rInput.flush();
-			}
-		} catch (Exception e) {
+            loadLibraries();
+            if(initCode != null){
+                rInput.writeBytes(initCode + "\n");
+                rInput.flush();
+            }
+        } catch (Exception e) {
             // failing to start R process => refuse to start the topology
-			throw new RuntimeException("Could not start R, please check install and settings" , e);
-		}
+            throw new RuntimeException("Could not start R, please check install and settings" , e);
+        }
     }
-	
-	private void loadLibraries() throws IOException{
-		for(String lib : libraries){
-			rInput.writeBytes("library('"+ lib +"')\n");
-		}
-		rInput.flush();
-	}
-	
-	public static String trimOutput(String output){
-        if (output == null) return "";
-		output = output.replace("[1]", "");
-		output = output.replace("\\", "");
-		output = output.trim();
-		return output.substring(1, output.length() - 1);
-	}
-	
-	private JSONArray getResult() throws ParseException{
-		StringBuilder stringBuilder = new StringBuilder();
 
-		boolean awaitingStart = true;
+    private void loadLibraries() throws IOException{
+        for(String lib : libraries){
+            rInput.writeBytes("library('"+ lib +"')\n");
+        }
+        rInput.flush();
+    }
+
+    public static String trimOutput(String output){
+        if (output == null) return "";
+        output = output.replace("[1]", "");
+        output = output.replace("\\", "");
+        output = output.trim();
+        return output.substring(1, output.length() - 1);
+    }
+
+    private JSONArray getResult() throws ParseException{
+        StringBuilder stringBuilder = new StringBuilder();
+
+        boolean awaitingStart = true;
         checkErrors();
 
         while (responses.isEmpty()) {
@@ -138,13 +141,13 @@ public class RFunction extends BaseFunction {
                 throw new RExecutionException("Unrecognized response from R runtime: " + response);
             return null;
         }
-		final String trimmedContent = trimOutput(response);
-		if(trimmedContent == null)
-			return null;
-		if("[]".equals(trimmedContent))
-			return null;
+        final String trimmedContent = trimOutput(response);
+        if(trimmedContent == null)
+            return null;
+        if("[]".equals(trimmedContent))
+            return null;
         return (JSONArray)JSONValue.parseWithException(trimmedContent);
-	}
+    }
 
     /** Checks the presence of any error reported by R and, if so, throws an exception **/
     private void checkErrors(){
@@ -166,39 +169,39 @@ public class RFunction extends BaseFunction {
 
     @Override
     public void cleanup() {
-    	process.destroy();
+        process.destroy();
     }
-    
+
     public JSONArray coerceTuple(TridentTuple tuple){
-    	JSONArray array = new JSONArray();
-    	array.addAll(tuple);
-    	return array;
+        JSONArray array = new JSONArray();
+        array.addAll(tuple);
+        return array;
     }
-    
+
     public Values coerceResponce(JSONArray array){
-    	return new Values(array.toArray());
+        return new Values(array.toArray());
     }
-    
+
     public JSONArray performFunction(JSONArray functionInput){
-    	try {
+        try {
 
-    		String input = functionInput.toJSONString().replace("\\", "");
-			rInput.writeBytes("list <- fromJSON('" + input + "')\n");
-			rInput.writeBytes("output <- " + functionName + "(list)\n");
-			rInput.writeBytes("write('" + START_LINE + "', stdout())\n");
-			rInput.writeBytes("toJSON(output)\n");
-			rInput.writeBytes("write('" + END_LINE + "', stdout())\n");
-			rInput.flush();
+            String input = functionInput.toJSONString().replace("\\", "");
+            rInput.writeBytes("list <- fromJSON('" + input + "')\n");
+            rInput.writeBytes("output <- " + functionName + "(list)\n");
+            rInput.writeBytes("write('" + START_LINE + "', stdout())\n");
+            rInput.writeBytes("toJSON(output)\n");
+            rInput.writeBytes("write('" + END_LINE + "', stdout())\n");
+            rInput.flush();
 
-			return getResult();
-		} catch (IOException | ParseException e) {
+            return getResult();
+        } catch (IOException | ParseException e) {
             checkErrors();
-			throw new RExecutionException("Exception handling response from R" , e);
-		}
+            throw new RExecutionException("Exception handling response from R" , e);
+        }
     }
 
-	@Override
-	public void execute(TridentTuple tuple, TridentCollector collector) {
+    @Override
+    public void execute(TridentTuple tuple, TridentCollector collector) {
         try {
             JSONArray functionInput = coerceTuple(tuple);
             JSONArray result = performFunction(functionInput);
@@ -208,7 +211,7 @@ public class RFunction extends BaseFunction {
             // assuming any R error is non retry-able (we could improve this)
             System.err.println("Error while calling R. Assuming non retry-able => stopping here!");
         }
-	}
+    }
 
 
     /**
