@@ -8,6 +8,7 @@ import java.util.Queue;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 
+import org.apache.commons.io.FileUtils;
 import org.json.simple.JSONArray;
 import org.json.simple.JSONValue;
 import org.json.simple.parser.ParseException;
@@ -19,6 +20,12 @@ import storm.trident.operation.TridentCollector;
 import storm.trident.operation.TridentOperationContext;
 import storm.trident.tuple.TridentTuple;
 
+/**
+ * Storm Function that invokes a R function for each tuple.
+ *
+ * A R process is started
+ *
+ * */
 public class RFunction extends BaseFunction {
 	
 	private Process process;
@@ -31,9 +38,9 @@ public class RFunction extends BaseFunction {
     private Queue<String> responses = new LinkedList<>();
     private transient Executor exec;
 
-    private static String ls = System.getProperty("line.separator");
-	private String initCode = null;
+	private String initCode;
 
+    private static String ls = System.getProperty("line.separator");
 	public static final String START_LINE = "<s>";
 	public static final String END_LINE = "<e>";
 	
@@ -41,12 +48,11 @@ public class RFunction extends BaseFunction {
 		this.rExecutable = rExecutable;
 		this.functionName = functionName;
 		this.libraries = libraries;
+        this.libraries.add("rjson");
 	}
 	
 	public RFunction(List<String> libraries, String functionName){
-		rExecutable = "/usr/bin/R";
-		this.functionName = functionName;
-		this.libraries = libraries;
+        this("/usr/bin/R", libraries, functionName);
 	}
 	
 	public RFunction withInitCode(String rCode){
@@ -54,18 +60,18 @@ public class RFunction extends BaseFunction {
 		return this;
 	}
 	
-	public RFunction withNamedInitCode(String name){
-		this.initCode = readFile("/" + name + ".R");
-		return this;
+	public RFunction withNamedInitCode(String name) throws IOException {
+		return withInitCode(FileUtils.readFileToString(new File("/" + name + ".R")));
 	}
-	
+
+    @Override
 	public void prepare(Map conf, TridentOperationContext context) {
-		ProcessBuilder builder = new ProcessBuilder(rExecutable, "--vanilla", "-q", "--slave");
 		try {
+		    ProcessBuilder builder = new ProcessBuilder(rExecutable, "--vanilla", "-q", "--slave");
 			process = builder.start();
             exec = Executors.newFixedThreadPool(2);
 
-            // I/O to R + async thread to listen to errors
+            // I/O to R + async thread to listen to stdout and stderr
 			rInput = new DataOutputStream(process.getOutputStream());
             exec.execute(new RIOReader(process.getInputStream(), responses));
             exec.execute(new RIOReader(process.getErrorStream(), errors));
@@ -75,13 +81,13 @@ public class RFunction extends BaseFunction {
 				rInput.writeBytes(initCode + "\n");
 				rInput.flush();
 			}
-		} catch (IOException e) {
+		} catch (Exception e) {
+            // failing to start R process => refuse to start the topology
 			throw new RuntimeException("Could not start R, please check install and settings" , e);
 		}
     }
 	
 	private void loadLibraries() throws IOException{
-		rInput.writeBytes("library('rjson')\n");
 		for(String lib : libraries){
 			rInput.writeBytes("library('"+ lib +"')\n");
 		}
@@ -107,10 +113,9 @@ public class RFunction extends BaseFunction {
                 System.out.println("waiting answer from R...");
                 Thread.sleep(100);
             } catch (InterruptedException e) {
-                e.printStackTrace();
+                // NOP
             }
         }
-
 
         while (!responses.isEmpty()) {
             String line = responses.poll();
@@ -119,7 +124,7 @@ public class RFunction extends BaseFunction {
                 awaitingStart = false;
             } else if(line.equals(END_LINE)) {
                 if(awaitingStart)
-                    throw new RuntimeException("Something went wrong. Received response ending before beginning!");
+                    throw new RExecutionException("Something went wrong. Received response ending before beginning!");
                 break;
             } else if(!awaitingStart){
                 stringBuilder.append(line);
@@ -130,7 +135,7 @@ public class RFunction extends BaseFunction {
         final String response = stringBuilder.toString().trim();
         if(awaitingStart) {
             if (!"".equals(response))
-                throw new RuntimeException("Unrecognized response from R runtime: " + response);
+                throw new RExecutionException("Unrecognized response from R runtime: " + response);
             return null;
         }
 		final String trimmedContent = trimOutput(response);
@@ -148,32 +153,16 @@ public class RFunction extends BaseFunction {
             while (!errors.isEmpty()) {
                 err.append(errors.poll());
             }
-            throw new RuntimeException("Error from the R runtime: " + err);
+            throw new RExecutionException("Error from the R runtime: " + err);
         }
 
         try {
+            // R has died => killing the node, this should trigger a restart and restart R
             throw new RuntimeException("R runtime has terminated with return value: " + process.exitValue());
         } catch (IllegalThreadStateException exc) {
             // NOP: the process has not terminated: things are cool
         }
     }
-
-    public static String readFile(String file) {
-		BufferedReader reader = new BufferedReader(new InputStreamReader(
-				RFunction.class.getResourceAsStream(file)));
-		StringBuilder stringBuilder = new StringBuilder();
-
-		try {
-		    String line;
-			while ((line = reader.readLine()) != null) {
-				stringBuilder.append(line);
-				stringBuilder.append(ls);
-			}
-		} catch (IOException e) {
-			throw new RuntimeException("Could not load resource: ", e);
-		}
-		return stringBuilder.toString();
-	}
 
     @Override
     public void cleanup() {
@@ -204,16 +193,21 @@ public class RFunction extends BaseFunction {
 			return getResult();
 		} catch (IOException | ParseException e) {
             checkErrors();
-			throw new RuntimeException("Exception handling response from R" , e);
+			throw new RExecutionException("Exception handling response from R" , e);
 		}
     }
 
 	@Override
 	public void execute(TridentTuple tuple, TridentCollector collector) {
-		JSONArray functionInput = coerceTuple(tuple);
-		JSONArray result = performFunction(functionInput);
-		if(result != null)
-			collector.emit(coerceResponce(result));
+        try {
+            JSONArray functionInput = coerceTuple(tuple);
+            JSONArray result = performFunction(functionInput);
+            if(result != null)
+                collector.emit(coerceResponce(result));
+        } catch (RExecutionException exc) {
+            // assuming any R error is non retry-able (we could improve this)
+            System.err.println("Error while calling R. Assuming non retry-able => stopping here!");
+        }
 	}
 
 
@@ -242,7 +236,7 @@ public class RFunction extends BaseFunction {
                     }
                 }
             } catch (Exception e) {
-                throw new RuntimeException("could not read stream from R runtime", e);
+                throw new RExecutionException("could not read stream from R runtime", e);
             } finally {
                 try {
                     reader.close();

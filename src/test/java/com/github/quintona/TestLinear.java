@@ -2,6 +2,7 @@ package com.github.quintona;
 
 import static org.junit.Assert.*;
 
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collection;
 
@@ -47,9 +48,7 @@ public class TestLinear {
     }
 
 	@Test
-	public void test() throws InterruptedException {
-        System.out.println("inputttts = " + Arrays.asList(inputs));
-
+	public void test() throws InterruptedException, IOException {
 		TridentTuple values = new MockTridentTuple(Arrays.asList(getNames(inputs.length)), Arrays.asList(inputs));
 
         System.out.println("values = " + values);
@@ -63,10 +62,7 @@ public class TestLinear {
 
 		StopWatch stopWatch = new LoggingStopWatch("First Run");
 		JSONArray array = function.coerceTuple(values);
-        System.out.println("array = " + array);
         JSONArray result = function.performFunction(array);
-        System.out.println("result = " + result);
-//        System.out.println("result = " + result.toArray(new Double[0]));
         stopWatch.stop();
 		Double[] actuals = (Double[])result.toArray(new Double[0]);
 		for(int i = 0; i < expected.length; i++){

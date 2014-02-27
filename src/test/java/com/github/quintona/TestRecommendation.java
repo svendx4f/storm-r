@@ -48,6 +48,7 @@ public class TestRecommendation {
 	}
 
 
+    // I can't make this test work on my dev machine
 //	@Test()
 //	public void test() throws InterruptedException {
 //		TridentTuple values = new MockTridentTuple(
