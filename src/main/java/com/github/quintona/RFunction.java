@@ -23,7 +23,10 @@ import storm.trident.tuple.TridentTuple;
 /**
  * Storm Function that invokes a R function for each tuple.
  *
- * A R process is started
+ * A separate R process is started during the initialization.
+ *
+ * Any error occurring during initialization trigger a failure to start the topology. Any error occurring at runtime
+ * is considered non retry-able and is just logged.
  *
  * */
 public class RFunction extends BaseFunction {
